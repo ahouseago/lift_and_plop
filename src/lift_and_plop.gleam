@@ -156,17 +156,18 @@ fn droppable(
   let on_drag_over =
     event.on("dragover", decode.success(drag_over_handler(id)))
     |> event.prevent_default
-  let on_drag_end = event.on("dragend", decode.success(drop_handler("")))
+
+  // This doesn't work yet, see https://github.com/lustre-labs/lustre/issues/290
+  // let on_drag_end = event.on("dragend", decode.success(drop_handler("")))
 
   let attributes = case is_placeholder {
-    True -> [class("draggable placeholder"), on_drop, on_drag_over, on_drag_end]
+    True -> [class("draggable placeholder"), on_drop, on_drag_over]
     False -> [
       class("draggable"),
       attribute("draggable", "true"),
       on_drag_start,
       on_drag_over,
       on_drop,
-      on_drag_end,
     ]
   }
 
