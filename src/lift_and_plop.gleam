@@ -1,175 +1,184 @@
 import gleam/dynamic/decode
-import gleam/int
-import gleam/list
+import gleam/float
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import iv.{type Array}
 import lustre
 import lustre/attribute.{attribute, class}
+import lustre/effect
 import lustre/element.{text}
 import lustre/element/html.{div}
-import lustre/element/keyed
 import lustre/event
+import plinth/browser/document
 
 pub fn main() {
-  let app = lustre.simple(init, update, view)
+  let app = lustre.application(init, update, view)
   let assert Ok(_) = lustre.start(app, "#app", Nil)
 
   Nil
 }
 
-pub type Element {
-  Element(id: String, content: String, is_placeholder: Bool)
+fn listen_for_pointer_up() {
+  use dispatch <- effect.from
+  document.add_event_listener("pointerup", fn(_event) { dispatch(PointerUp) })
 }
 
-pub type DragState {
-  DragState(element_id: String, element_index: Int, placeholder_index: Int)
+@external(javascript, "./lift_and_plop.ffi.mjs", "listen_for_pointer_move")
+fn do_listen_for_pointer_move(_handler: fn(decode.Dynamic) -> Nil) -> Nil {
+  Nil
+}
+
+fn listen_for_pointer_move(
+  handler: fn(decode.Dynamic) -> msg,
+) -> effect.Effect(msg) {
+  use dispatch <- effect.from
+  use dyn <- do_listen_for_pointer_move
+
+  dyn |> handler |> dispatch
+}
+
+fn handle_pointer_move(e: decode.Dynamic) {
+  let decoded =
+    decode.run(e, {
+      use client_x <- decode.field("clientX", decode.float)
+      use client_y <- decode.field("clientY", decode.float)
+
+      decode.success(PointerMove(client_x, client_y))
+    })
+  decoded
+  |> result.unwrap(PointerUp)
+}
+
+pub type TargetBox {
+  Box(
+    x: Float,
+    y: Float,
+    width: Float,
+    height: Float,
+    offset_x: Float,
+    offset_y: Float,
+  )
+}
+
+pub type PointerPosition {
+  PointerPosition(x: Float, y: Float)
 }
 
 pub type Model {
-  Model(elements: Array(Element), drag_state: Option(DragState))
+  Model(clicked: Option(TargetBox))
 }
 
 fn init(_flags) {
-  Model(
-    elements: iv.initialise(4, fn(i) {
-      let id = int.to_string(i)
-      Element("number-" <> id, "Number " <> id, False)
-    }),
-    drag_state: None,
+  #(
+    Model(None),
+    effect.batch([
+      listen_for_pointer_up(),
+      listen_for_pointer_move(handle_pointer_move),
+    ]),
   )
 }
 
 type Msg {
-  DragStart(draggable_id: String)
-  DragOver(dragged_over_id: String)
-  DropEnd(dropped_id: String)
+  PointerDown(target: TargetBox)
+  PointerMove(x: Float, y: Float)
+  PointerUp
 }
 
-fn update(model, msg) {
+fn update(model, msg: Msg) {
   case model, msg {
-    Model(elements:, ..), DragStart(draggable_id) -> {
-      let drag_state =
-        iv.find_index(elements, has_id(draggable_id))
-        |> result.map(fn(placeholder_index) {
-          DragState(
-            element_id: draggable_id,
-            element_index: placeholder_index,
-            placeholder_index: placeholder_index,
-          )
-        })
-        |> option.from_result
-
-      let elements =
-        iv.map(elements, fn(element) {
-          Element(..element, is_placeholder: element.id == draggable_id)
-        })
-      Model(elements:, drag_state:)
+    Model(None), PointerDown(target) -> {
+      #(Model(Some(target)), effect.none())
     }
-    Model(elements:, ..), DropEnd(dropped_id) -> {
-      echo "drop_end " <> dropped_id <> " or maybe nothing"
-      let elements =
-        iv.map(elements, fn(element) {
-          Element(..element, is_placeholder: False)
-        })
-
-      Model(elements:, drag_state: None)
+    Model(Some(target_box)), PointerMove(x, y) -> {
+      #(Model(Some(Box(..target_box, x:, y:))), effect.none())
     }
-    Model(elements:, drag_state: Some(drag_state)), DragOver(dragged_over_id:) -> {
-      let dragged_over_index = iv.find_index(elements, has_id(dragged_over_id))
-      let elements =
-        {
-          use dragged_element <- result.try(iv.find(
-            elements,
-            has_id(drag_state.element_id),
-          ))
-          use dragged_over_index <- result.map(dragged_over_index)
-          iv.try_delete(elements, drag_state.placeholder_index)
-          |> iv.insert_clamped(dragged_over_index, dragged_element)
-        }
-        |> result.unwrap(elements)
-
-      let drag_state =
-        dragged_over_index
-        |> result.map(fn(placeholder_index) {
-          DragState(..drag_state, placeholder_index:)
-        })
-        |> result.unwrap(drag_state)
-
-      Model(elements:, drag_state: Some(drag_state))
+    Model(Some(..)), PointerUp -> {
+      #(Model(None), effect.none())
     }
-    Model(..), DragOver(..) -> model
+    _, _ -> #(model, effect.none())
   }
-}
-
-fn has_id(id: String) {
-  fn(element: Element) { element.id == id }
 }
 
 fn view(model: Model) {
-  keyed.div(
-    [],
-    model.elements
-      |> iv.to_list
-      |> list.map(fn(element) {
-        case element.is_placeholder {
-          True -> #(
-            "placeholder",
-            droppable(
-              id: "placeholder",
-              on_drag_start: DragStart,
-              on_drag_over: DragOver,
-              on_drop: DropEnd,
-              is_placeholder: True,
-              children: [text(element.content)],
-            ),
-          )
-          False -> #(
-            element.id,
-            droppable(
-              id: element.id,
-              on_drag_start: DragStart,
-              on_drag_over: DragOver,
-              on_drop: DropEnd,
-              is_placeholder: False,
-              children: [text(element.content)],
-            ),
-          )
-        }
-      }),
-  )
+  div([], [
+    draggable([text("Drag me!")], PointerDown),
+    draggable(
+      [
+        text(
+          "Loreum ipsum dolor sit aasdjfka jafsj kej kaod jskaf dadsfo andcie amk jaou cmka j that went fo tfha keicm a",
+        ),
+      ],
+      PointerDown,
+    ),
+    draggable([text("Drag me!")], PointerDown),
+    draggable([text("Drag me!")], PointerDown),
+    case model.clicked {
+      None -> element.none()
+      Some(box) -> drag_box(box, PointerMove)
+    },
+  ])
 }
 
-fn droppable(
-  id id: String,
-  on_drag_start drag_start_handler: fn(String) -> msg,
-  on_drag_over drag_over_handler: fn(String) -> msg,
-  on_drop drop_handler: fn(String) -> msg,
-  is_placeholder is_placeholder: Bool,
-  children children,
+fn draggable(
+  children,
+  on_pointer_down handle_pointer_down: fn(TargetBox) -> msg,
 ) {
-  let on_drag_start =
-    event.on("dragstart", decode.success(drag_start_handler(id)))
-  let on_drop =
-    event.on("drop", decode.success(drop_handler(id)))
+  let on_pointer_down =
+    event.on("pointerdown", {
+      use client_x <- decode.field("clientX", decode.float)
+      use client_y <- decode.field("clientY", decode.float)
+      use offset_x <- decode.field("offsetX", decode.float)
+      use offset_y <- decode.field("offsetY", decode.float)
+      use width <- decode.then(decode.at(
+        ["currentTarget", "clientWidth"],
+        decode.float,
+      ))
+      use height <- decode.then(decode.at(
+        ["currentTarget", "clientHeight"],
+        decode.float,
+      ))
+
+      decode.success(
+        handle_pointer_down(Box(
+          x: client_x,
+          y: client_y,
+          width:,
+          height:,
+          offset_x:,
+          offset_y:,
+        )),
+      )
+    })
     |> event.prevent_default
-  let on_drag_over =
-    event.on("dragover", decode.success(drag_over_handler(id)))
-    |> event.prevent_default
+  div([class("draggable"), on_pointer_down], children)
+}
 
-  // This doesn't work yet, see https://github.com/lustre-labs/lustre/issues/290
-  // let on_drag_end = event.on("dragend", decode.success(drop_handler("")))
+fn drag_box(
+  box: TargetBox,
+  on_pointer_move handle_pointer_move: fn(Float, Float) -> msg,
+) {
+  let on_pointer_move =
+    event.on("pointermove", {
+      use client_x <- decode.field("clientX", decode.float)
+      use client_y <- decode.field("clientY", decode.float)
 
-  let attributes = case is_placeholder {
-    True -> [class("draggable placeholder"), on_drop, on_drag_over]
-    False -> [
-      class("draggable"),
-      attribute("draggable", "true"),
-      on_drag_start,
-      on_drag_over,
-      on_drop,
-    ]
-  }
+      decode.success(handle_pointer_move(client_x, client_y))
+    })
+    |> event.throttle(50)
 
-  div(attributes, children)
+  let x = box.x -. box.offset_x
+  let y = box.y -. box.offset_y
+  let width = box.width
+  let height = box.height
+
+  div(
+    [
+      on_pointer_move,
+      class("pointer-box"),
+      attribute.style("left", float.to_string(x) <> "px"),
+      attribute.style("top", float.to_string(y) <> "px"),
+      attribute.style("width", float.to_string(width) <> "px"),
+      attribute.style("height", float.to_string(height) <> "px"),
+    ],
+    [],
+  )
 }
